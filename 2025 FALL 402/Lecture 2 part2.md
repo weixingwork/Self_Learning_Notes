@@ -10,7 +10,7 @@
 - 应用程序**不能直接使用硬件**（CPU、内存、磁盘、网络等）。
 - OS 提供 **抽象**（abstractions）：
     - 文件（file） → 对应磁盘
-    - 进程（process/program） → 对应 CPU
+    - 进程（process/program） →memory
     - 地址空间（address space） → 对应内存
     - 线程（thread） → 对应“执行流”
 
