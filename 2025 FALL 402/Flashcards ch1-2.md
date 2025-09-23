@@ -1197,3 +1197,283 @@ pthread_barrier_init, pthread_barrier_destroy, pthread_barrier_wait
 Q: Barrier 的应用例子？
 
 A: Fork-join 模型：多个线程并行执行，等到所有线程都完成，主线程才能继续。
+
+---
+### **线程安全 (Thread Safety)**
+
+- **Q: 什么是线程安全？**
+    
+    - **A:** 线程安全指的是让那些在设计时未考虑线程问题的库函数，能够在多线程环境下安全地运行 。由于 Unix 是在线程普及之前开发的，其许多库函数本身并非线程安全的 。
+        
+- **Q: 旧版 Unix API 存在哪些线程不安全的问题？**
+    
+    - **A:**
+        
+        - **全局变量**: 例如 `errno`，在多线程中同时调用并都失败时，无法保证线程获取到正确的错误码 。
+            
+        - **共享数据**: 例如 `printf()`，多线程同时调用可能会导致输出交错混乱 。
+            
+- **Q: `errno` 的线程不安全问题有什么具体的代码示例吗？**
+    
+    - **A:** 在下面的代码中，如果两个线程同时调用 `IOfunc` 并且 `write` 都失败了，后一个线程设置的 `errno` 可能会覆盖前一个线程的 `errno`，导致前一个线程读取到错误的错误码 
+
+```
+int IOfunc(int fd) {
+    extern int errno;
+    if (write(fd, buffer, size) == -1) {
+        if (errno == EIO)
+            ...
+    }
+    ...
+}
+```
+- **Q: 多线程使用 `printf()` 会出现什么问题？**
+    
+    - **A:** 两个线程的输出可能会混合在一起，导致内容错乱 。例如：
+        
+        - 线程 1 执行:
+            
+            `printf("goto statement reached");`
+            
+        - 线程 2 执行:
+            
+            `printf("Hello World\n");`
+            
+        - 最终可能得到的输出是:
+            
+            `goto Hello Wostatement reachedrld`
+            
+
+### **线程安全的实现方法**
+
+- **Q: 如何解决 `errno` 的线程安全问题？**
+    
+    - **A:** POSIX 通过提供线程私有数据存储机制来解决 。通过将
+        
+        `errno` 定义为指向每个线程独立的存储位置，确保每个线程访问自己的 `errno` 副本 。这样无需修改应用程序代码，只需重新编译即可 。
+        
+- **Q: 对于返回全局数据的函数，如何使其线程安全？**
+    
+    - **A:** 添加一个“可重入”(`_r`)版本 。例如，非线程安全的
+        
+        `gethostbyname()` 返回一个指向全局变量的指针 ，而 POSIX 提供了
+        
+        `gethostbyname_r()` 版本，该版本要求调用者自行提供用于存储返回数据的缓冲区，从而解决了共享全局数据的问题 。
+        
+    - **非线程安全版本:**
+        
+        C
+        
+        ```
+        struct hostent *gethostbyname(const char *name)
+        ```
+        
+    - **线程安全的可重入版本:**
+        
+        C
+        
+        ```
+        int gethostbyname_r(const char *name,
+                            struct hostent *ret,
+                            char *buf,
+                            size_t buflen,
+                            struct hostent **result,
+                            int *h_errnop)
+        ```
+        
+- **Q: 如何解决 `printf()` 这类函数的线程安全问题？**
+    
+    - **A:** 可以使用同步机制来包装库函数 。例如，对于 C 标准 I/O 库中的
+        
+        `FILE*` 对象，可以使用以下函数来加锁和解锁，以保护 `printf()` 这样的调用 ：
+        
+        C
+        
+        ```
+        void flockfile(FILE *filehandle)
+        int ftrylockfile(FILE *filehandle)
+        void funlockfile(FILE *filehandle)
+        ```
+        
+
+### **线程的定时与等待**
+
+- **Q: 线程如何进行延时或等待？**
+    
+    - **A:**
+        
+        - **`nanosleep()`**: 可以让线程挂起一段指定的时间 ，但这是一种“尽力而为”的机制 。
+            
+            C
+            
+            ```
+            struct timespec timeout, remaining_time;
+            timeout.tv_sec = 3;         // seconds
+            timeout.tv_nsec = 1000;     // nanoseconds
+            nanosleep(&timeout, &remaining_time);
+            ```
+            
+        - **`pthread_cond_timedwait()`**: 是一种更精确的等待方式，它允许线程等待一个条件变量，直到被唤醒或超过一个指定的**绝对时间点** (`abstime`) 。
+            
+            C
+            
+            ```
+            // abstime 需要通过当前时间加上相对的超时时间来计算
+            struct timespec absolute_timeout;
+            ... // 计算 absolute_timeout
+            pthread_mutex_lock(&m);
+            while (!may_continue)
+                pthread_cond_timedwait(&cv, &m, &absolute_timeout);
+            pthread_mutex_unlock(&m);
+            ```
+            
+
+### **线程的异常与信号 (Signal)**
+
+- **Q: 什么是信号 (Signal)？**
+    
+    - **A:** 信号是一种操作系统提供的“回调机制” 或“软件中断” 。它用于响应异常（如算术错误 ）、外部事件（如定时器到期、键盘输入 ）或用户自定义事件 。例如，除以零的操作会产生一个信号 。
+        
+        C
+        
+        ```
+        int x, y;
+        x = 0;
+        ...
+        y = 16 / x; // 这会产生一个信号
+        ```
+        
+- **Q: 如何向进程或线程发送信号？**
+    
+    - **A:**
+        
+        - **`kill(pid_t pid, int sig)`**: 发送一个指定的信号给某个进程 。
+            
+        - **`pthread_kill(pthread_t thr, int sig)`**: 在同一进程内，发送信号给指定的线程 。不过，若要终止线程，推荐使用 POSIX 的取消机制 (cancellation mechanism) 。
+
+
+---
+好的 👍，我来帮你梳理 **lecture7-slides2.pdf** 的新内容，并结合我们之前的风格解释细致一些：
+
+---
+
+### **🔹Thread Safety**
+
+- **背景**
+    
+    Unix 最早设计时没有线程的概念，所有的库函数都是默认单线程环境。后来多线程流行起来后，这些库函数在多线程下就变得不安全了。
+    
+- **问题**
+    
+    比如全局变量 errno，或者 printf 中共享的 buffer。如果多个线程同时访问，就可能出现数据混乱。
+    
+- **解决**
+    
+    - 改写库函数 → 支持线程安全
+        
+    - 用同步机制（mutex 等）包装老函数
+        
+    
+
+---
+
+### **🔹Thread Safety vs. Reentrancy**
+
+- **Thread-safe**: 多个线程可以同时调用函数，而不会互相影响。
+    
+- **Reentrant**: 即使函数在执行中被打断（例如信号或中断），再次进入也能安全执行。
+    
+- 二者不同，但很多时候 **线程安全**和**可重入**最终都要求类似的措施。
+    
+
+---
+
+### **🔹Global Variables 问题**
+
+- errno 是全局变量，如果两个线程几乎同时调用失败的系统调用，一个线程可能会覆盖另一个的 errno。
+    
+- **结果**: 某个线程读到的错误码可能不是它自己的。
+    
+
+---
+
+### **🔹解决方案**
+
+1. **线程私有数据 (Thread-specific data, TSD)**
+    
+    - POSIX 提供了机制，让每个线程有自己独立的 errno。
+        
+    - 类似 #define errno __errno(thread_ID)，每个线程访问到的是属于自己的那份。
+        
+    - Windows 里叫 **thread-local storage (TLS)**。
+        
+    
+2. **Reentrant 版本 API**
+    
+    - 例如 gethostbyname() 原本返回一个指向全局变量的指针（不安全）。
+        
+    - POSIX 提供了 gethostbyname_r()，让调用者自己提供 buffer 存放返回结果 → 避免共享数据。
+        
+    
+
+---
+
+### **🔹Shared Data 问题**
+
+- 多线程同时 printf，可能导致输出交错：
+    
+
+```
+goto Hello Wostatement reachedrld
+```
+
+-   
+    
+- **解决**: 用 flockfile(FILE*) 等函数对 FILE* 上锁，确保同一时间只有一个线程在写。
+    
+
+---
+
+### **🔹Sleeping 和 Timeout**
+
+- **nanosleep()**: 可以指定休眠时间。
+    
+- **pthread_cond_timedwait()**:
+    
+    - 可以在等待条件变量时设置超时时间。
+        
+    - 超时后返回错误码（不是无限等）。
+        
+    
+
+---
+
+### **🔹Deviations: 信号和线程取消**
+
+- **Unix signal**：最初设计用来优雅终止进程，例如 <Ctrl+C>。
+    
+- **用途**:
+    
+    - 异常（除零、非法内存访问等）
+        
+    - 外部事件（定时器、键盘输入）
+        
+    - 杀死或暂停进程
+        
+    
+- **信号和中断类似**：可以阻塞、解除阻塞、挂起、恢复。
+    
+- **线程**：有 pthread_kill() 发送信号给线程，但推荐用 **pthread cancellation** 代替。
+    
+
+---
+
+### **🔹信号的状态**
+
+- **pending**: 信号已经产生，但被阻塞，还没被传递。
+    
+- **delivered**: 一旦解除阻塞，立即传递。
+    
+- 类似 CPU 硬件中断的 “disable/enable”。
+    
+---
